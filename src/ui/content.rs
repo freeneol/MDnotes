@@ -32,8 +32,8 @@ pub fn view<'a>(
     editor_content: &'a text_editor::Content,
 ) -> Element<'a, Message> {
     match mode {
-        Mode::Reading => view_reading(document),
-        Mode::Editing => view_editing(editor_content),
+        Mode::Preview => view_reading(document),
+        Mode::Markdown => view_editing(editor_content),
     }
 }
 

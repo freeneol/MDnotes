@@ -1,17 +1,20 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
-use iced::widget::{column, container, row, text_editor};
-use iced::{Element, Length, Task};
+use iced::widget::{
+    button, column, container, horizontal_space, mouse_area, row, text, text_editor, vertical_rule,
+};
+use iced::{Element, Length, Padding, Task};
 
 use crate::io::config::AppConfig;
 use crate::io::file::{self, FileEntry};
 use crate::markdown::model::Document;
 use crate::markdown::{parser, serializer};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
-    Reading,
-    Editing,
+    Preview,
+    Markdown,
 }
 
 pub struct App {
@@ -23,7 +26,9 @@ pub struct App {
     pub mode: Mode,
     pub file_tree: Vec<FileEntry>,
     pub sidebar_visible: bool,
+    pub expanded_folders: HashSet<PathBuf>,
     pub editor_content: text_editor::Content,
+    pub sidebar_dragging: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -31,14 +36,19 @@ pub enum Message {
     OpenFile,
     FileOpened(Option<(PathBuf, String)>),
     SaveFile,
-    FileSaved(#[allow(dead_code)] Result<(), String>),
-    ToggleMode,
+    #[allow(dead_code)]
+    FileSaved(Result<(), String>),
+    SwitchToPreview,
+    SwitchToMarkdown,
     OpenFolder,
     FolderSelected(Option<PathBuf>),
     SelectFile(PathBuf),
     ToggleSidebar,
-    #[allow(dead_code)]
-    ContentChanged(String),
+    ToggleFolder(PathBuf),
+    CloseFile,
+    SidebarDragStart,
+    SidebarDragMove(f32),
+    SidebarDragEnd,
     EditorAction(text_editor::Action),
     KeyPressed(iced::keyboard::Key, iced::keyboard::Modifiers),
     Noop,
@@ -50,7 +60,7 @@ impl App {
         let file_tree = config
             .main_folder
             .as_ref()
-            .map(|f| file::list_md_files(f))
+            .map(|f| file::list_all_files(f))
             .unwrap_or_default();
 
         let app = Self {
@@ -59,10 +69,12 @@ impl App {
             document: None,
             original_content: None,
             content_text: String::new(),
-            mode: Mode::Reading,
+            mode: Mode::Preview,
             file_tree,
             sidebar_visible: true,
+            expanded_folders: HashSet::new(),
             editor_content: text_editor::Content::new(),
+            sidebar_dragging: false,
         };
         (app, Task::none())
     }
@@ -75,6 +87,25 @@ impl App {
             ),
             None => "MDnotes".to_string(),
         }
+    }
+
+    pub fn breadcrumb(&self) -> Vec<String> {
+        let Some(file_path) = &self.current_file else {
+            return Vec::new();
+        };
+        if let Some(folder) = &self.config.main_folder {
+            if let Ok(rel) = file_path.strip_prefix(folder) {
+                return rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().to_string())
+                    .collect();
+            }
+        }
+        vec![file_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()]
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -108,12 +139,12 @@ impl App {
             Message::SaveFile => {
                 if let (Some(path), Some(_doc)) = (&self.current_file, &self.document) {
                     let content = match self.mode {
-                        Mode::Editing => {
+                        Mode::Markdown => {
                             let doc = parser::parse(&self.content_text);
                             self.document = Some(doc.clone());
                             serializer::serialize(&doc)
                         }
-                        Mode::Reading => self
+                        Mode::Preview => self
                             .document
                             .as_ref()
                             .map(|d| serializer::serialize(d))
@@ -128,25 +159,25 @@ impl App {
                 }
             }
             Message::FileSaved(_) => {}
-            Message::ToggleMode => match self.mode {
-                Mode::Reading => {
-                    if self.document.is_some() {
-                        self.content_text = self
-                            .document
-                            .as_ref()
-                            .map(|d| serializer::serialize(d))
-                            .unwrap_or_default();
-                        self.editor_content =
-                            text_editor::Content::with_text(&self.content_text);
-                        self.mode = Mode::Editing;
-                    }
-                }
-                Mode::Editing => {
+            Message::SwitchToPreview => {
+                if self.document.is_some() && self.mode == Mode::Markdown {
                     let doc = parser::parse(&self.content_text);
                     self.document = Some(doc);
-                    self.mode = Mode::Reading;
+                    self.mode = Mode::Preview;
                 }
-            },
+            }
+            Message::SwitchToMarkdown => {
+                if self.document.is_some() && self.mode == Mode::Preview {
+                    self.content_text = self
+                        .document
+                        .as_ref()
+                        .map(|d| serializer::serialize(d))
+                        .unwrap_or_default();
+                    self.editor_content =
+                        text_editor::Content::with_text(&self.content_text);
+                    self.mode = Mode::Markdown;
+                }
+            }
             Message::OpenFolder => {
                 return Task::perform(
                     async {
@@ -160,8 +191,9 @@ impl App {
             }
             Message::FolderSelected(folder) => {
                 if let Some(path) = folder {
-                    self.file_tree = file::list_md_files(&path);
+                    self.file_tree = file::list_all_files(&path);
                     self.config.main_folder = Some(path);
+                    self.expanded_folders.clear();
                     self.config.save();
                 }
             }
@@ -180,8 +212,36 @@ impl App {
             Message::ToggleSidebar => {
                 self.sidebar_visible = !self.sidebar_visible;
             }
-            Message::ContentChanged(new_content) => {
-                self.content_text = new_content;
+            Message::ToggleFolder(path) => {
+                if self.expanded_folders.contains(&path) {
+                    self.expanded_folders.remove(&path);
+                } else {
+                    self.expanded_folders.insert(path);
+                }
+            }
+            Message::CloseFile => {
+                self.current_file = None;
+                self.document = None;
+                self.original_content = None;
+                self.content_text.clear();
+                self.mode = Mode::Preview;
+                self.editor_content = text_editor::Content::new();
+            }
+            Message::SidebarDragStart => {
+                if self.sidebar_visible {
+                    self.sidebar_dragging = true;
+                }
+            }
+            Message::SidebarDragMove(x) => {
+                if self.sidebar_dragging {
+                    self.config.sidebar_width = x.clamp(120.0, 500.0);
+                }
+            }
+            Message::SidebarDragEnd => {
+                if self.sidebar_dragging {
+                    self.sidebar_dragging = false;
+                    self.config.save();
+                }
             }
             Message::EditorAction(action) => {
                 self.editor_content.perform(action);
@@ -197,8 +257,8 @@ impl App {
                         Key::Character(c) if c.as_str() == "s" => {
                             return self.update(Message::SaveFile);
                         }
-                        Key::Character(c) if c.as_str() == "e" => {
-                            return self.update(Message::ToggleMode);
+                        Key::Character(c) if c.as_str() == "w" => {
+                            return self.update(Message::CloseFile);
                         }
                         Key::Character(c) if c.as_str() == "\\" => {
                             return self.update(Message::ToggleSidebar);
@@ -218,7 +278,7 @@ impl App {
         self.original_content = Some(content.clone());
         self.content_text = content;
         self.current_file = Some(path.clone());
-        self.mode = Mode::Reading;
+        self.mode = Mode::Preview;
         self.config.add_recent_file(path);
         self.config.save();
     }
@@ -243,54 +303,99 @@ impl App {
         let word_count = self.document.as_ref().map(|d| d.word_count()).unwrap_or(0);
 
         let mode_str = match self.mode {
-            Mode::Reading => "阅读",
-            Mode::Editing => "编辑",
+            Mode::Preview => "Preview",
+            Mode::Markdown => "Markdown",
         };
 
         format!("{} | {} 字 | {}", path_str, word_count, mode_str)
     }
 
     pub fn subscription(&self) -> iced::Subscription<Message> {
-        iced::keyboard::on_key_press(|key, modifiers| {
+        let key_sub = iced::keyboard::on_key_press(|key, modifiers| {
             Some(Message::KeyPressed(key, modifiers))
-        })
+        });
+
+        if self.sidebar_dragging {
+            let drag_sub = iced::event::listen_with(|event, _status, _id| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::SidebarDragMove(position.x))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::SidebarDragEnd),
+                _ => None,
+            });
+            iced::Subscription::batch(vec![key_sub, drag_sub])
+        } else {
+            key_sub
+        }
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let toolbar = crate::ui::toolbar::view(self.current_file.is_some(), &self.mode);
+        let toolbar = crate::ui::toolbar::view(
+            self.current_file.is_some(),
+            &self.mode,
+            &self.breadcrumb(),
+        );
 
-        let sidebar: Element<Message> = if self.sidebar_visible {
-            crate::ui::sidebar::view(
-                &self.file_tree,
-                &self.config.recent_files,
-                self.config.main_folder.is_some(),
-            )
-        } else {
-            column![].into()
-        };
-
-        let main_content: Element<Message> = if self.document.is_some() {
-            crate::ui::content::view(
+        let main_content: Element<'_, Message> = if self.document.is_some() {
+            let content = crate::ui::content::view(
                 self.document.as_ref().unwrap(),
                 &self.mode,
                 &self.content_text,
                 &self.editor_content,
+            );
+
+            let close_row = container(
+                row![
+                    horizontal_space(),
+                    button(text("×").size(16))
+                        .on_press(Message::CloseFile)
+                        .padding(Padding::from([2, 8]))
+                        .style(button::text),
+                ]
+                .width(Length::Fill),
             )
+            .padding(Padding::from([2, 4]));
+
+            column![close_row, content]
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .into()
         } else {
             crate::ui::welcome::view()
         };
 
-        let sidebar_width = if self.sidebar_visible {
-            self.config.sidebar_width
-        } else {
-            0.0
-        };
+        let middle = if self.sidebar_visible {
+            let sidebar = crate::ui::sidebar::view(
+                &self.file_tree,
+                &self.expanded_folders,
+                &self.config.main_folder,
+            );
 
-        let middle = row![
-            container(sidebar).width(Length::Fixed(sidebar_width)).height(Length::Fill),
-            container(main_content).width(Length::Fill).height(Length::Fill),
-        ]
-        .height(Length::Fill);
+            let divider = mouse_area(
+                container(vertical_rule(1))
+                    .width(Length::Fixed(6.0))
+                    .height(Length::Fill),
+            )
+            .on_press(Message::SidebarDragStart);
+
+            row![
+                container(sidebar)
+                    .width(Length::Fixed(self.config.sidebar_width))
+                    .height(Length::Fill),
+                divider,
+                container(main_content)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            ]
+            .height(Length::Fill)
+        } else {
+            row![container(main_content)
+                .width(Length::Fill)
+                .height(Length::Fill)]
+            .height(Length::Fill)
+        };
 
         let statusbar = crate::ui::statusbar::view(self.status_text());
 
