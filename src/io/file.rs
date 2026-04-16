@@ -30,6 +30,7 @@ pub fn list_md_files(dir: &Path) -> Vec<FileEntry> {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum FileEntry {
     File { name: String, path: PathBuf },
     Directory { name: String, path: PathBuf, children: Vec<FileEntry> },

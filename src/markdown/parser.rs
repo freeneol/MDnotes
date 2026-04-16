@@ -2,13 +2,15 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, CodeBlockKind};
 use super::model::*;
 
 pub fn parse(markdown: &str) -> Document {
-    let parser = Parser::new_ext(markdown, Options::empty());
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_TABLES);
+    let parser = Parser::new_ext(markdown, opts);
     let events: Vec<Event> = parser.collect();
-    let blocks = parse_blocks(&events, &mut 0);
+    let blocks = parse_blocks(&events, &mut 0, false);
     Document { blocks }
 }
 
-fn parse_blocks(events: &[Event], pos: &mut usize) -> Vec<Block> {
+fn parse_blocks(events: &[Event], pos: &mut usize, nested: bool) -> Vec<Block> {
     let mut blocks = Vec::new();
     while *pos < events.len() {
         match &events[*pos] {
@@ -33,7 +35,7 @@ fn parse_blocks(events: &[Event], pos: &mut usize) -> Vec<Block> {
                     }
                     Tag::BlockQuote(_) => {
                         *pos += 1;
-                        let inner = parse_blocks(events, pos);
+                        let inner = parse_blocks(events, pos, true);
                         blocks.push(Block::BlockQuote(inner));
                     }
                     Tag::CodeBlock(kind) => {
@@ -48,15 +50,56 @@ fn parse_blocks(events: &[Event], pos: &mut usize) -> Vec<Block> {
                         let content = collect_text(events, pos);
                         blocks.push(Block::CodeBlock(CodeBlock { language, content }));
                     }
-                    _ => { *pos += 1; }
+                    Tag::Table(_) => {
+                        *pos += 1;
+                        let table = collect_table(events, pos);
+                        blocks.push(Block::Table(table));
+                    }
+                    _ => {
+                        *pos += 1;
+                        skip_to_end(events, pos);
+                    }
                 }
             }
-            Event::End(_) => { *pos += 1; break; }
-            Event::Rule => { blocks.push(Block::HorizontalRule); *pos += 1; }
-            _ => { *pos += 1; }
+            Event::End(_) => {
+                *pos += 1;
+                if nested {
+                    break;
+                }
+            }
+            Event::Rule => {
+                blocks.push(Block::HorizontalRule);
+                *pos += 1;
+            }
+            Event::Text(t) => {
+                blocks.push(Block::Paragraph(vec![InlineSpan::new_text(&t.to_string())]));
+                *pos += 1;
+            }
+            Event::Html(html) => {
+                let text = html.to_string().trim().to_string();
+                if !text.is_empty() {
+                    blocks.push(Block::Paragraph(vec![InlineSpan::new_text(&text)]));
+                }
+                *pos += 1;
+            }
+            _ => {
+                *pos += 1;
+            }
         }
     }
     blocks
+}
+
+fn skip_to_end(events: &[Event], pos: &mut usize) {
+    let mut depth = 1;
+    while *pos < events.len() && depth > 0 {
+        match &events[*pos] {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
+        *pos += 1;
+    }
 }
 
 fn collect_inline_spans(events: &[Event], pos: &mut usize) -> Vec<InlineSpan> {
@@ -112,6 +155,10 @@ fn collect_inline_spans(events: &[Event], pos: &mut usize) -> Vec<InlineSpan> {
                     *pos += 1;
                 }
             }
+            Event::InlineHtml(html) => {
+                spans.push(InlineSpan::new_text(&html.to_string()));
+                *pos += 1;
+            }
             Event::End(_) => { *pos += 1; break; }
             _ => { *pos += 1; }
         }
@@ -125,20 +172,19 @@ fn collect_list_items(events: &[Event], pos: &mut usize, ordered: bool) -> Vec<L
         match &events[*pos] {
             Event::Start(Tag::Item) => {
                 *pos += 1;
-                let mut all_spans = Vec::new();
-                while *pos < events.len() {
-                    match &events[*pos] {
-                        Event::Start(Tag::Paragraph) => {
+                let all_spans;
+                if *pos < events.len() && matches!(events[*pos], Event::Start(Tag::Paragraph)) {
+                    *pos += 1;
+                    all_spans = collect_inline_spans(events, pos);
+                    while *pos < events.len() {
+                        if matches!(events[*pos], Event::End(TagEnd::Item)) {
                             *pos += 1;
-                            all_spans.extend(collect_inline_spans(events, pos));
+                            break;
                         }
-                        Event::End(TagEnd::Item) => { *pos += 1; break; }
-                        Event::Text(t) => {
-                            all_spans.push(InlineSpan::new_text(&t.to_string()));
-                            *pos += 1;
-                        }
-                        _ => { *pos += 1; }
+                        *pos += 1;
                     }
+                } else {
+                    all_spans = collect_inline_spans(events, pos);
                 }
                 items.push(ListItem { ordered, spans: all_spans });
             }
@@ -147,6 +193,53 @@ fn collect_list_items(events: &[Event], pos: &mut usize, ordered: bool) -> Vec<L
         }
     }
     items
+}
+
+fn collect_table(events: &[Event], pos: &mut usize) -> Table {
+    let mut header: Vec<Vec<InlineSpan>> = Vec::new();
+    let mut rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
+
+    while *pos < events.len() {
+        match &events[*pos] {
+            Event::Start(Tag::TableHead) => {
+                *pos += 1;
+                header = collect_table_row(events, pos);
+            }
+            Event::Start(Tag::TableRow) => {
+                *pos += 1;
+                let row = collect_table_row(events, pos);
+                rows.push(row);
+            }
+            Event::End(TagEnd::Table) => {
+                *pos += 1;
+                break;
+            }
+            _ => { *pos += 1; }
+        }
+    }
+
+    Table { header, rows }
+}
+
+fn collect_table_row(events: &[Event], pos: &mut usize) -> Vec<Vec<InlineSpan>> {
+    let mut cells = Vec::new();
+
+    while *pos < events.len() {
+        match &events[*pos] {
+            Event::Start(Tag::TableCell) => {
+                *pos += 1;
+                let spans = collect_inline_spans(events, pos);
+                cells.push(spans);
+            }
+            Event::End(TagEnd::TableHead) | Event::End(TagEnd::TableRow) => {
+                *pos += 1;
+                break;
+            }
+            _ => { *pos += 1; }
+        }
+    }
+
+    cells
 }
 
 fn collect_text(events: &[Event], pos: &mut usize) -> String {

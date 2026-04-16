@@ -31,12 +31,13 @@ pub enum Message {
     OpenFile,
     FileOpened(Option<(PathBuf, String)>),
     SaveFile,
-    FileSaved(Result<(), String>),
+    FileSaved(#[allow(dead_code)] Result<(), String>),
     ToggleMode,
     OpenFolder,
     FolderSelected(Option<PathBuf>),
     SelectFile(PathBuf),
     ToggleSidebar,
+    #[allow(dead_code)]
     ContentChanged(String),
     EditorAction(text_editor::Action),
     KeyPressed(iced::keyboard::Key, iced::keyboard::Modifiers),
@@ -255,7 +256,7 @@ impl App {
         })
     }
 
-    pub fn view(&self) -> Element<Message> {
+    pub fn view(&self) -> Element<'_, Message> {
         let toolbar = crate::ui::toolbar::view(self.current_file.is_some(), &self.mode);
 
         let sidebar: Element<Message> = if self.sidebar_visible {
@@ -286,11 +287,12 @@ impl App {
         };
 
         let middle = row![
-            container(sidebar).width(Length::Fixed(sidebar_width)),
-            container(main_content).width(Length::Fill),
-        ];
+            container(sidebar).width(Length::Fixed(sidebar_width)).height(Length::Fill),
+            container(main_content).width(Length::Fill).height(Length::Fill),
+        ]
+        .height(Length::Fill);
 
-        let statusbar = crate::ui::statusbar::view(&self.status_text());
+        let statusbar = crate::ui::statusbar::view(self.status_text());
 
         column![toolbar, middle, statusbar]
             .height(Length::Fill)

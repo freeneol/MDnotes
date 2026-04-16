@@ -10,6 +10,7 @@ impl Document {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum Block {
     Heading(u8, Vec<InlineSpan>),
     Paragraph(Vec<InlineSpan>),
@@ -17,6 +18,7 @@ pub enum Block {
     BlockQuote(Vec<Block>),
     CodeBlock(CodeBlock),
     Image(ImageBlock),
+    Table(Table),
     HorizontalRule,
 }
 
@@ -31,9 +33,20 @@ impl Block {
             }).sum(),
             Block::BlockQuote(blocks) => blocks.iter().map(|b| b.word_count()).sum(),
             Block::CodeBlock(cb) => cb.content.split_whitespace().count(),
+            Block::Table(table) => {
+                table.header.iter().chain(table.rows.iter().flatten())
+                    .map(|cell| cell.iter().map(|s| s.word_count()).sum::<usize>())
+                    .sum()
+            }
             Block::Image(_) | Block::HorizontalRule => 0,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Table {
+    pub header: Vec<Vec<InlineSpan>>,
+    pub rows: Vec<Vec<Vec<InlineSpan>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +76,7 @@ pub struct InlineSpan {
     pub link: Option<String>,
 }
 
+#[allow(dead_code)]
 impl InlineSpan {
     pub fn new_text(text: &str) -> Self {
         Self {

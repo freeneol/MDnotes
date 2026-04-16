@@ -45,6 +45,26 @@ fn serialize_block(block: &Block, out: &mut String, prefix: &str) {
             out.push_str(&cb.content);
             out.push_str("```\n");
         }
+        Block::Table(table) => {
+            out.push_str("| ");
+            for (i, cell) in table.header.iter().enumerate() {
+                if i > 0 { out.push_str(" | "); }
+                serialize_spans(cell, out);
+            }
+            out.push_str(" |\n");
+            for _ in 0..table.header.len() {
+                out.push_str("| --- ");
+            }
+            out.push_str("|\n");
+            for row in &table.rows {
+                out.push_str("| ");
+                for (i, cell) in row.iter().enumerate() {
+                    if i > 0 { out.push_str(" | "); }
+                    serialize_spans(cell, out);
+                }
+                out.push_str(" |\n");
+            }
+        }
         Block::Image(img) => {
             out.push_str(&format!("![{}]({})\n", img.alt, img.url));
         }

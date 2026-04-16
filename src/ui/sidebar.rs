@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use iced::widget::{button, column, container, horizontal_rule, scrollable, text, Column};
+use iced::widget::{button, container, horizontal_rule, scrollable, text, Column};
 use iced::{Element, Length, Padding};
 
 use crate::app::Message;
